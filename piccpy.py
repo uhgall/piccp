@@ -13,7 +13,6 @@ import itertools
 from pipyadc.ADS1256_definitions import *
 from pipyadc import ADS1256
 
-
 # Change this to the local DNS name of your Pi (often raspberrypi.local, if you have changed it) or
 # make it blank to connect to localhost.
 #PI_HOST = 'klabs.local'
@@ -25,6 +24,7 @@ ads = ADS1256() #pi=io.pi(PI_HOST))
 
 ### STEP 2: Gain and offset self-calibration:
 ads.cal_self()
+ads.drate(DRATE_30000)
 
 #initialize PWM
 GPIO.setmode(GPIO.BCM)
