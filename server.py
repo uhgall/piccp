@@ -16,7 +16,7 @@ import itertools
 from pipyadc.ADS1256_definitions import *
 from pipyadc import ADS1256
 
-from bottle import route, run, template, request
+from bottle import route, run, template
 
 import plotly.offline as po
 import plotly.graph_objs as go
@@ -33,11 +33,8 @@ import atexit
 ads = ADS1256() #pi=io.pi(PI_HOST))
 
 ### STEP 2: Gain and offset self-calibration:
-ads.drate = DRATE_30000
-#ads.v_ref= 3.3
 ads.cal_self()
-
-#ads.pga_gain = 2
+ads.drate = DRATE_30000
 
 #initialize PWM
 GPIO.setmode(GPIO.BCM)
@@ -53,26 +50,61 @@ def exit_handler():
     print('Stopped PWM, cleaned up GPIO.')
 atexit.register(exit_handler)
 
+
+class IPPCController(threading.Thread) :
+
+    ms_current = None
+    ms_voltage = None
+    cv_voltage = 0
+    cv_dc = 50 # start in the middle
+
+    def set_voltage(self,cv_voltage):
+        self.cv_voltage = voltage
+
+    def run(self):
+        R1 = 0.135 # Ohms
+        pwm.ChangeDutyCycle(self.cv_dc)
+
+        while True:
+            vals = ads.read_sequence([POS_AIN2|NEG_AINCOM,POS_AIN3|NEG_AINCOM])
+            self.ms_voltage = (vals[0] - vals[1]) * ads.v_per_digit
+            self.ms_current = vals[1] * ads.v_per_digit / R1
+
+            delta = self.cv_voltage - self.ms_voltage
+            dc = self.cv_dc - 20.0 * delta
+            if dc > 100:
+                self.cv_dc = 100
+            elif dc < 0:
+                self.cv_dc = 0
+            else:
+                self.cv_dc = dc
+
+            print("Commanded voltage is {}. Current measured voltage is {}. Setting dc to {}.".format(self.cv_voltage, self.ms_voltage, self.cv_dc))
+            pwm.ChangeDutyCycle(self.cv_dc)
+            time.sleep(0.001)
+
+# ippc = IPPCController()
+# ippc.start()
+
 def read_adc(which,avg_count=1):  
     raw = 0 
     for i in range(avg_count):
         raw = raw + ads.read_sequence([which])[0]
     return(ads.v_per_digit * raw / avg_count)
 
+def read_current():
+    r1 = 0.135 # Ohms
+    u = read_adc(POS_AIN3|NEG_AINCOM)
+    return(u / r1)
+
 def read_electrode_voltage():
     vals = ads.read_sequence([POS_AIN2|NEG_AINCOM,POS_AIN3|NEG_AINCOM])
     return((vals[0] - vals[1]) * ads.v_per_digit)
 
-@route('/set_dc')
-def set_dc():
-    dc = float(request.query.dc)
-    pwm.ChangeDutyCycle(dc)
+@route('/status')
+def status():
+    return("Commanded voltage is {:.3f}V. Current measured voltage is {:.3f}V. Current is {:.3f}A. Implies a resistive load of {:.3f} Ohms. dc was {:.2f}%".format(ippc.cv_voltage, ippc.ms_voltage, ippc.ms_current, ippc.ms_voltage / ippc.ms_current, ippc.cv_dc))
 
-    u2 = read_adc(POS_AIN2|NEG_AINCOM,100)
-    u3 = read_adc(POS_AIN3|NEG_AINCOM,100)
-    r1 = 0.27 # ohms
-    i1 = u3 / r1
-    return("Duty cycle set to {:.2f}. U2 = {:.3f}V. U3 = {:.3f}V. Current = {:.3f}A.".format(dc,u2, u3, i1))
 
 v_dc = OpenStruct(
     traces=1,
@@ -88,21 +120,12 @@ v_dc.info = template("""
 
 @route('/')
 def home():
-    u2 = read_adc(POS_AIN2|NEG_AINCOM,100)
-    u3 = read_adc(POS_AIN3|NEG_AINCOM,100)
-    r1 = 0.27 # ohms
-    i1 = u3 / r1
-    v_dc.s = ("U2 = {:.3f}V. U3 = {:.3f}V. Current = {:.3f}A. v_ref={:.3f}V".format(u2, u3, i1,ads.v_ref))
-
     return(template("""
-        <h1>{{s}}</h1>
+
         <h1>Tools</h1>
         <ul>
         <li>
         <a href="/v_for_given_dc">{{info}}</a>
-        </li>
-        <li>
-        <a href="/set_dc?dc=100">Set Duty Cycle to 100</a>
         </li>
         </ul>
         """,**v_dc))
@@ -134,7 +157,7 @@ def v_for_given_dc():
                    xaxis_title='Duty Cycle (%)',
                    yaxis_title='Voltage (V)')
 
-    return("<h1>Voltage as a function of duty cycle</h1><p>{}.<br /> Actual time {:.3f}.</p>{}\n".format(v_dc.info,measurement_time,fig.to_html()))
+    return("<h1>Voltage as a function of duty cycle</h1><p>{}. Actual time {}.</p>{}\n".format(v_dc.info,measurement_time,fig.to_html()))
 
 
 
