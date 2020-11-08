@@ -24,6 +24,8 @@ import plotly.graph_objs as go
 
 import atexit
 
+CIRCUIT_R1 = 0.27 # Ohms; shunt resistor in series to load
+
 
 # Change this to the local DNS name of your Pi (often raspberrypi.local, if you have changed it) or
 # make it blank to connect to localhost.
@@ -57,14 +59,18 @@ class IPPCController(threading.Thread) :
     ms_current = None
     ms_voltage = None
     cv_voltage = 2.2
-    cv_dc = 200 # start in the middle
+    cv_dc = 50 # start in the middle
 
     def set_voltage(self,cv_voltage):
         self.cv_voltage = voltage
 
     def run(self):
-        R1 = 0.27 # Ohms
         pwm.ChangeDutyCycle(self.cv_dc)
+
+        pid = PID.PID(5,1,1)
+        pid.setPoint = self.cv_voltage
+        pid.setSampleTime(1)
+
         repeats = 100
 
         while True:
@@ -73,19 +79,14 @@ class IPPCController(threading.Thread) :
                 vals = [x+y for x,y in zip(vals, ads.read_sequence([POS_AIN2|NEG_AINCOM,POS_AIN3|NEG_AINCOM]))]
 
             self.ms_voltage = (vals[0] - vals[1]) * ads.v_per_digit / repeats
-            self.ms_current = (vals[1] * ads.v_per_digit / repeats) / R1 
+            self.ms_current = (vals[1] * ads.v_per_digit / repeats) / CIRCUIT_R1
 
-            delta = self.cv_voltage - self.ms_voltage
-            dc = self.cv_dc - 10.0 * delta
-            if dc > 100:
-                self.cv_dc = 100
-            elif dc < 0:
-                self.cv_dc = 0
-            else:
-                self.cv_dc = dc
+            pid.update(self.ms_voltage)
+            dc = pid.output
+            self.cv_dc = max(min( int(dc), 100 ),0)
 
-            print("Commanded voltage is {}. Current measured voltage is {}. Setting dc to {}.".format(self.cv_voltage, self.ms_voltage, self.cv_dc))
-            pwm.ChangeDutyCycle(self.cv_dc)
+            print("Commanded voltage is {}. Current measured voltage is {}. Setting dc to {}.".format(self.cv_voltage, self.ms_voltage, dc))
+            pwm.ChangeDutyCycle(100-self.cv_dc)
             time.sleep(0.050)
 
 ippc = IPPCController()
@@ -98,9 +99,8 @@ def read_adc(which,avg_count=100):
     return(ads.v_per_digit * raw / avg_count)
 
 def read_current():
-    r1 = 0.27 # Ohms
     u = read_adc(POS_AIN3|NEG_AINCOM)
-    return(u / r1)
+    return(u / CIRCUIT_R1)
 
 def read_electrode_voltage():
     vals = ads.read_sequence([POS_AIN2|NEG_AINCOM,POS_AIN3|NEG_AINCOM])
