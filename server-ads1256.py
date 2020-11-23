@@ -14,10 +14,8 @@ import sys
 import time
 import numpy as np
 import itertools
-
-
-import ADS1115
-import time
+from pipyadc.ADS1256_definitions import *
+from pipyadc import ADS1256
 
 from bottle import route, run, template, request
 
@@ -26,23 +24,20 @@ import plotly.graph_objs as go
 
 import atexit
 
-from sklearn.preprocessing import PolynomialFeatures 
-from sklearn.linear_model import LinearRegression 
-from sklearn.pipeline import make_pipeline
-from sklearn.linear_model import Ridge
-from sklearn import linear_model
-
-
-
-
 CIRCUIT_R1 = 0.27 # Ohms; shunt resistor in series to load
 
 
 # Change this to the local DNS name of your Pi (often raspberrypi.local, if you have changed it) or
 # make it blank to connect to localhost.
 #PI_HOST = 'klabs.local'
+### STEP 1: Initialise ADC object using default configuration:
+# (Note1: See ADS1256_default_config.py, see ADS1256 datasheet)
+# (Note2: Input buffer on means limited voltage range 0V...3V for 5V supply)
+ads = ADS1256() #pi=io.pi(PI_HOST))
+ads.drate = DRATE_30000
 
-ads = ADS1115.ADS1115()    
+### STEP 2: Gain and offset self-calibration:
+ads.cal_self()
 
 #initialize PWM
 GPIO.setmode(GPIO.BCM)
@@ -59,88 +54,24 @@ def exit_handler():
 atexit.register(exit_handler)
 
 
-class VForDC(threading.Thread) :
-
-    x = None
-    ms_v = None
-    sample_time = None
-    started = None
-    finished = None
-    current_x = 0
-
-    def run(self):
-        if self.started == None:
-
-            self.started = time.time()
-
-            self.sample_time = 0.001
-            trace_count = 1
-            self.ms_v = [[] for i in range(trace_count)]
-            self.x = []
-            for cv_dc in range(0,100,1):
-                print(cv_dc)
-                self.current_x = cv_dc
-                self.x.append(cv_dc)
-                pwm.ChangeDutyCycle(cv_dc)
-                for t in range(trace_count):
-                    time.sleep(self.sample_time)
-                    self.ms_v[t].append(read_electrode_voltage())
-            self.finished = time.time()
-        else:
-            print("Won't start again, it's already running for #{}".format(self.started-time.time()))
-
-
-
 class IPPCController(threading.Thread) :
 
     ms_current = None
     ms_voltage = None
     cv_voltage = 2.2
     cv_dc = 50 # start in the middle
-    running = False
 
     def set_voltage(self,cv_voltage):
         self.cv_voltage = voltage
 
-    def run_delta(self):
-
-        self.calc_v_for_dc()
-
-        self.running = True
+    def run(self):
         pwm.ChangeDutyCycle(self.cv_dc)
-
-        while True:
-            vals = ads.read_sequence([POS_AIN2|NEG_AINCOM,POS_AIN3|NEG_AINCOM])
-            self.ms_voltage = (vals[0] - vals[1]) * ads.v_per_digit
-            self.ms_current = vals[1] * ads.v_per_digit / R1
-
-            delta = self.cv_voltage - self.ms_voltage
-            dc = self.cv_dc - 20.0 * delta
-            if dc > 100:
-                self.cv_dc = 100
-            if dc < 0:
-                self.cv_dc = 0
-            else:
-                self.cv_dc = dc
-
-            #print("Commanded voltage is {}. Current measured voltage is {}. Setting dc to {}.".format(self.cv_voltage, self.ms_voltage, self.cv_dc))
-            pwm.ChangeDutyCycle(self.cv_dc)
-            time.sleep(0.001)
-
-
-    def run_pid(self):
-
-
-        self.calc_v_for_dc()
-
-        self.running = True
-        pwm.ChangeDutyCycle(self.cv_dc)
-        repeats = 10
+        repeats = 100
         self.last_time =  time.time()
 
-        self.Kp = -20
-        self.Ki = -2
-        self.Kd = -1
+        self.Kp = -50
+        self.Ki = -10
+        self.Kd = -5
 
         self.PTerm = 0.0
         self.ITerm = 0.0
@@ -160,12 +91,10 @@ class IPPCController(threading.Thread) :
         while True:
             vals = [0,0,0]
             for i in range(repeats):
-                time.sleep(0.01)
-                for ch in range(3):
-                    vals[ch] += ads.readADCSingleEnded(channel=ch)
-                    
-            self.ms_voltage = (vals[1] - vals[0]) / repeats / 1000.0 # in volts, not mv
-            self.ms_current = (vals[0] / repeats) / CIRCUIT_R1 / 1000.0
+                vals = [x+y for x,y in zip(vals, ads.read_sequence([POS_AIN2|NEG_AINCOM,POS_AIN3|NEG_AINCOM]))]
+
+            self.ms_voltage = (vals[0] - vals[1]) * ads.v_per_digit / repeats
+            self.ms_current = (vals[1] * ads.v_per_digit / repeats) / CIRCUIT_R1
             self.current_time = time.time()
 
             Input = self.ms_voltage
@@ -213,34 +142,30 @@ class IPPCController(threading.Thread) :
             # dc = self.PTerm + (self.Ki * self.ITerm) + (self.Kd * self.DTerm)
 
             self.cv_dc = max(min( int(dc), 100 ),0)
-            print("cv={:.4f}. mv={:.4f} dc={:.4f} err={:.4f}".format(self.cv_voltage, self.ms_voltage, dc, error))
+            print("After dt={}, cv={}. mv={} dc={} err={}".format(0,self.cv_voltage, self.ms_voltage, dc, error))
 
             #print("After delta_time={}, commanded voltage is {}. Current measured voltage is {}. Setting dc to {}.".format(0,self.cv_voltage, self.ms_voltage, dc))
             pwm.ChangeDutyCycle(self.cv_dc)
             time.sleep(0.050)
 
-    def run(self):
-        self.run_pid()
-
-
 def read_adc(which,avg_count=100):  
     raw = 0 
     for i in range(avg_count):
-        raw = raw + ads.readADCSingleEnded(which)
-    return(raw / avg_count / 1000.0)
+        raw = raw + ads.read_sequence([which])[0]
+    return(ads.v_per_digit * raw / avg_count)
 
 def read_current():
-    u = read_adc(0)
+    u = read_adc(POS_AIN3|NEG_AINCOM)
     return(u / CIRCUIT_R1)
 
 def read_electrode_voltage():
-    return(read_adc(1)-read_adc(0))
+    vals = ads.read_sequence([POS_AIN2|NEG_AINCOM,POS_AIN3|NEG_AINCOM])
+    return((vals[0] - vals[1]) * ads.v_per_digit)
+
+
 
 ippc = IPPCController()
 ippc.start()
-
-v_for_dc = VForDC()
-# v_for_dc.start()
 
 
 @route('/')
@@ -266,7 +191,7 @@ def home():
 def time_series():
     ippc.cv_voltage = float(request.query.v)
 
-    sample_time = 0.001
+    sample_time = 0.100
     ms_v = []
     cv_dc = []
     x = []
@@ -280,7 +205,10 @@ def time_series():
         mode='lines',
         name="Electrode Voltage")
         )
-
+    # fig.add_trace(go.Scatter(x=x, y=cv_dc,
+    #     mode='markers',
+    #     name="Duty Cycle")
+    #     )
     fig.update_layout(title='Voltage as a function of time',
                    xaxis_title='time (ms)',
                    yaxis_title='Voltage (V)')
@@ -289,63 +217,7 @@ def time_series():
 
 
 
-
-
-@route('/v_for_dc_regression_plot')
-def v_for_dc_regression_plot():
-
-    if (v_for_dc.started == None):
-        v_for_dc.started = time.time()
-        v_for_dc.start()
-
-    if (v_for_dc.started != None and v_for_dc.finished == None ):
-        return("<h1>Already running</h1><p>Not finished yet, have {} points after {}s. </p>".format(v_for_dc.current_x,time.time() - v_for_dc.started))
-
-
-    npy = np.array(v_for_dc.ms_v[0])
-    npx = np.array(v_for_dc.x)
- 
-    # poly = PolynomialFeatures(degree=2)
-    # X_ = poly.fit_transform([x])
-    # predict_ = poly.fit_transform([x])
-    # clf = linear_model.LinearRegression()
-    # clf.fit(X_, [y])
-    # res = clf.predict(predict_)
-
-    lm=LinearRegression()
-    lm.fit(npx.reshape(-1,1),npy.reshape(-1,1))
-
-    # lm.fit([x],[y])
-
-    res=lm.predict(npx.reshape(-1,1)).reshape(1,-1)
-
-    #print(res.tolist())
-
-    fig = go.Figure()
-    for t in range(len(v_for_dc.ms_v)):
-        fig.add_trace(go.Scatter(x=v_for_dc.x, y=v_for_dc.ms_v[t],
-            mode='lines',
-            name="Electrode Voltage with #{:.3f}s delay".format(t*v_for_dc.sample_time)
-            ))
-
-  
-    fig.add_trace(go.Scatter(x=v_for_dc.x, y=res[0],
-        mode='lines',
-        name="Regression fit".format(t*v_for_dc.sample_time)))
-
-    fig.update_layout(title='Voltage as a function of duty cycle',
-                   xaxis_title='Duty Cycle (%)',
-                   yaxis_title='Voltage (V)')
-
-    return("<h1>Voltage as a function of duty cycle</h1>{}\n".format(fig.to_html()))
-
-
-
 run(host='localhost', port=8080, debug=True)
 
 
-# fields=['first','second','third']
-# with open(r'name', 'a') as f:
-#     writer = csv.writer(f)
-#     writer.writerow(fields)
 
