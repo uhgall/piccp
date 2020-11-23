@@ -89,8 +89,6 @@ class VForDC(threading.Thread) :
         else:
             print("Won't start again, it's already running for #{}".format(self.started-time.time()))
 
-
-
 class ICCPController(threading.Thread) :
 
     ms_current = None
@@ -104,138 +102,36 @@ class ICCPController(threading.Thread) :
 
     def run_delta(self):
 
+        print("starting to track...")
+
         self.running = True
         pwm.ChangeDutyCycle(self.cv_dc)
 
         while True:
-
-
-
-
-            self.ms_voltage = read_electrode_voltage()
-            self.ms_current = read_current()
-            
+            v0, v1 = read_adc(0,1)
+            self.ms_voltage = v1 - v0
+            self.ms_current = v0 / CIRCUIT_R1
             delta = self.cv_voltage - self.ms_voltage
             dc = self.cv_dc - 20.0 * delta
-            if dc > 100:
-                self.cv_dc = 100
-            if dc < 0:
-                self.cv_dc = 0
-            else:
-                self.cv_dc = dc
-
-            #print("Commanded voltage is {}. Current measured voltage is {}. Setting dc to {}.".format(self.cv_voltage, self.ms_voltage, self.cv_dc))
+            self.cv_dc = max(min(dc,100),0)
+            print("Commanded voltage is {}. Current measured voltage is {}. Setting dc to {}.".format(self.cv_voltage, self.ms_voltage, self.cv_dc))
             pwm.ChangeDutyCycle(self.cv_dc)
-            time.sleep(0.001)
+            time.sleep(0.010)
 
-
-    def run_pid(self):
-
-
-        #self.calc_v_for_dc()
-
-        self.running = True
-        pwm.ChangeDutyCycle(self.cv_dc)
-        repeats = 10
-        self.last_time =  time.time()
-
-        self.Kp = -20
-        self.Ki = -2
-        self.Kd = -1
-
-        self.PTerm = 0.0
-        self.ITerm = 0.0
-        self.DTerm = 0.0
-        self.last_error = 0.0
-
-        self.lastInput = 0
-        self.lastTime = time.time()
-
-        # Windup Guard
-        self.int_error = 0.0
-        self.windup_guard = 20.0
-
-        outMax = 100
-        outMin = 0
-
-        while True:
-            vals = [0,0,0]
-            for i in range(repeats):
-                time.sleep(0.01)
-                for ch in range(3):
-                    vals[ch] += ads.readADCSingleEnded(channel=ch)
-                    
-            self.ms_voltage = (vals[1] - vals[0]) / repeats / 1000.0 # in volts, not mv
-            self.ms_current = (vals[0] / repeats) / CIRCUIT_R1 / 1000.0
-            self.current_time = time.time()
-
-            Input = self.ms_voltage
-            SetPoint = self.cv_voltage
-
-            error = SetPoint - Input
-            self.ITerm += (self.Ki * error)
-            if (self.ITerm > outMax):
-                self.ITerm = outMax
-            elif (self.ITerm < outMin):
-                self.ITerm = outMin;
-            
-            dInput = (Input - self.lastInput);
- 
-            Output = self.Kp * error + self.ITerm - self.Kd * dInput;
-            if (Output > outMax):
-                Output = outMax;
-            elif (Output < outMin): 
-                Output = outMin;
- 
-            self.lastInput = Input;
-            self.lastTime = time.time()
-
-            dc = Output
-
-            # error = self.cv_voltage - self.ms_voltage
-            # delta_error = error - self.last_error
-
-            # delta_time = self.current_time - self.last_time
-            
-            # self.PTerm = self.Kp * error
-            # self.ITerm += error * delta_time
-
-            # if (self.ITerm < -self.windup_guard):
-            #     self.ITerm = -self.windup_guard
-            # elif (self.ITerm > self.windup_guard):
-            #     self.ITerm = self.windup_guard
-
-            # self.DTerm = delta_error / delta_time
-
-            # # Remember last time and last error for next calculation
-            # self.last_time = self.current_time
-            # self.last_error = error
-
-            # dc = self.PTerm + (self.Ki * self.ITerm) + (self.Kd * self.DTerm)
-
-            self.cv_dc = max(min( int(dc), 100 ),0)
-            print("cv={:.4f}. mv={:.4f} dc={:.4f} err={:.4f}".format(self.cv_voltage, self.ms_voltage, dc, error))
-
-            #print("After delta_time={}, commanded voltage is {}. Current measured voltage is {}. Setting dc to {}.".format(0,self.cv_voltage, self.ms_voltage, dc))
-            pwm.ChangeDutyCycle(self.cv_dc)
-            time.sleep(0.050)
-
-    def run(self):
-        self.run_delta()
-
-
-def read_adc(which,avg_count=25):  
-    raw = 0 
+def read_adc(channels,avg_count=25):  
+    raw = [0 for ch in channels]
     for i in range(avg_count):
-        raw = raw + ads.readADCSingleEnded(which)
-    return(raw / avg_count / 1000.0)
+        for ch in channels:
+            raw[ch] = raw[ch] + ads.readADCSingleEnded(ch)
+    return [raw[ch] / avg_count / 1000.0 for ch in channels]
 
 def read_current():
-    u = read_adc(0)
+    u = read_adc(0)[0]
     return(u / CIRCUIT_R1)
 
 def read_electrode_voltage():
-    return(read_adc(1)-read_adc(0))
+    v0, v1 = read_adc(0,1)
+    return(v1-v0)
 
 iccp = ICCPController()
 iccp.start()
@@ -289,9 +185,6 @@ def time_series():
     return("<h1>Voltage as a function of time</h1>{}\n".format(fig.to_html()))
 
 
-
-
-
 @route('/v_for_dc_regression_plot')
 def v_for_dc_regression_plot():
 
@@ -302,25 +195,11 @@ def v_for_dc_regression_plot():
     if (v_for_dc.started != None and v_for_dc.finished == None ):
         return("<h1>Already running</h1><p>Not finished yet, have {} points after {}s. </p>".format(v_for_dc.current_x,time.time() - v_for_dc.started))
 
-
     npy = np.array(v_for_dc.ms_v[0])
     npx = np.array(v_for_dc.x)
- 
-    # poly = PolynomialFeatures(degree=2)
-    # X_ = poly.fit_transform([x])
-    # predict_ = poly.fit_transform([x])
-    # clf = linear_model.LinearRegression()
-    # clf.fit(X_, [y])
-    # res = clf.predict(predict_)
-
     lm=LinearRegression()
     lm.fit(npx.reshape(-1,1),npy.reshape(-1,1))
-
-    # lm.fit([x],[y])
-
     res=lm.predict(npx.reshape(-1,1)).reshape(1,-1)
-
-    #print(res.tolist())
 
     fig = go.Figure()
     for t in range(len(v_for_dc.ms_v)):

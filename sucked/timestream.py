@@ -62,7 +62,3 @@ except Exception as err:
    print("Error:", err)
 
 
-
-[default]
-aws_access_key_id = AKIARQ6CHS7MEJY66MGX
-aws_secret_access_key = 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
