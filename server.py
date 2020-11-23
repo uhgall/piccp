@@ -91,7 +91,7 @@ class VForDC(threading.Thread) :
 
 
 
-class IPPCController(threading.Thread) :
+class ICCPController(threading.Thread) :
 
     ms_current = None
     ms_voltage = None
@@ -104,16 +104,17 @@ class IPPCController(threading.Thread) :
 
     def run_delta(self):
 
-        self.calc_v_for_dc()
-
         self.running = True
         pwm.ChangeDutyCycle(self.cv_dc)
 
         while True:
-            vals = ads.read_sequence([POS_AIN2|NEG_AINCOM,POS_AIN3|NEG_AINCOM])
-            self.ms_voltage = (vals[0] - vals[1]) * ads.v_per_digit
-            self.ms_current = vals[1] * ads.v_per_digit / R1
 
+
+
+
+            self.ms_voltage = read_electrode_voltage()
+            self.ms_current = read_current()
+            
             delta = self.cv_voltage - self.ms_voltage
             dc = self.cv_dc - 20.0 * delta
             if dc > 100:
@@ -131,7 +132,7 @@ class IPPCController(threading.Thread) :
     def run_pid(self):
 
 
-        self.calc_v_for_dc()
+        #self.calc_v_for_dc()
 
         self.running = True
         pwm.ChangeDutyCycle(self.cv_dc)
@@ -220,10 +221,10 @@ class IPPCController(threading.Thread) :
             time.sleep(0.050)
 
     def run(self):
-        self.run_pid()
+        self.run_delta()
 
 
-def read_adc(which,avg_count=100):  
+def read_adc(which,avg_count=25):  
     raw = 0 
     for i in range(avg_count):
         raw = raw + ads.readADCSingleEnded(which)
@@ -236,8 +237,8 @@ def read_current():
 def read_electrode_voltage():
     return(read_adc(1)-read_adc(0))
 
-ippc = IPPCController()
-ippc.start()
+iccp = ICCPController()
+iccp.start()
 
 v_for_dc = VForDC()
 # v_for_dc.start()
@@ -247,7 +248,7 @@ v_for_dc = VForDC()
 def home():
     status = "Commanded voltage is {:.3f}V. Current measured voltage is {:.3f}V. Current is {:.3f}A. Implies a resistive load of {:.3f} Ohms. dc was {:.2f}%"
     data = OpenStruct(
-        status = status.format(ippc.cv_voltage, ippc.ms_voltage, ippc.ms_current, ippc.ms_voltage / ippc.ms_current, ippc.cv_dc)
+        status = status.format(iccp.cv_voltage, iccp.ms_voltage, iccp.ms_current, iccp.ms_voltage / iccp.ms_current, iccp.cv_dc)
         )
     return(template("""
         <h1>{{status}}</h1>
@@ -264,16 +265,16 @@ def home():
 
 @route('/time_series')
 def time_series():
-    ippc.cv_voltage = float(request.query.v)
+    iccp.cv_voltage = float(request.query.v)
 
-    sample_time = 0.001
+    sample_time = 0.100
     ms_v = []
     cv_dc = []
     x = []
     for t in range(100):
         x.append(t)
-        ms_v.append(ippc.ms_voltage)
-        cv_dc.append(ippc.cv_dc)
+        ms_v.append(iccp.ms_voltage)
+        cv_dc.append(iccp.cv_dc)
         time.sleep(sample_time)
     fig = go.Figure()
     fig.add_trace(go.Scatter(x=x, y=ms_v,
