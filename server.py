@@ -93,11 +93,19 @@ class ICCPThread(threading.Thread):
         self.sample_time = 0.035
         super().__init__()
         self.set_status("Just started.")
-        self.cal_requested = False
+        self.set_fixed_voltage(self.cv_voltage)
 
-    def set_voltage(self,v):
+    def set_fixed_voltage(self,v):
         self.cv_voltage = v
+        self.set_status("Requesting fixed Voltage = {:.3f}.".format(v))
+        self.mode = "fixed_voltage"
 
+    def set_fixed_dc(self,dc):
+        self.cv_dc = dc
+        self.driver.set_dc(self.cv_dc)
+        self.set_status("Setting fixed DC = {:.0f}.".format(dc))
+        self.mode = "fixed_dc"
+    
     def set_status(self,s):
         self.status = s
         print(s)
@@ -120,23 +128,30 @@ class ICCPThread(threading.Thread):
         print("starting thread...")
 
         while True:
-            if (self.cal_requested):
+            self.ms_current, self.ms_voltage = self.driver.read_current_and_electrode_voltage()
+            if (self.mode == "calibration"):
+                v = self.cv_dc
                 self.calibrate()
-                self.cal_requested = False
-            else:
+                self.set_fixed_voltage(v)
+                self.set_status("Restarting control loop to keep voltage at {:.3f}V.".format(self.cv_dc))
+            elif (self.mode == "fixed_dc"):
+                s = "Commanded duty cycle is {:.0f}%. Measured voltage is {:.3f} V. Current is {:.3f} A."
+                self.set_status(s.format(self.cv_dc,self.ms_voltage, self.ms_current))
+            elif (self.mode == "fixed_voltage"):
                 self.driver.set_dc(self.cv_dc)
-                self.ms_current, self.ms_voltage = self.driver.read_current_and_electrode_voltage()
                 delta = self.cv_voltage - self.ms_voltage
                 dc = self.cv_dc - 20.0 * delta
                 self.cv_dc = max(min(dc,100),0)
                 self.driver.set_dc(self.cv_dc)
-                s = "Commanded voltage is {}. Measured voltage is {}. Setting dc to {}. Current is {} A."
+                s = "Commanded voltage is {:.3f} V. Measured voltage is {:.3f} V. Setting dc to {:.0f} %. Current is {:.3f} A."
                 self.set_status(s.format(self.cv_voltage, self.ms_voltage, self.cv_dc,self.ms_current))
-                time.sleep(self.sample_time) # TODO - look at last one to determine sleep
+            time.sleep(self.sample_time) # TODO - look at last one to determine sleep
 
 driver = IccpDriverADS1115(ads = ADS1115.ADS1115())
 iccp = ICCPThread(driver)
 iccp.start()
+
+BACK = "<p><a href=\"/\">Back to main page.</a></p>"
 
 @route('/')
 def home():
@@ -150,25 +165,23 @@ def home():
         <h1>Tools</h1>
         <ul>
         <li><a href="/v_for_dc_regression_plot">Calibration tool - Voltage as a function of duty cycle, regression plot.</a></li>
-        <li><a href="/set_v?v=2.5">Set electrode voltage to 2.5V</a></li>
-        <li><a href="/set_dc?dc=50">Set duty cycle to 50%</a></li>
+        <li><a href="/set_v?v=2.5">Set electrode voltage to 2.5V </a> (or whatever you want, by editing the URL).</li>
+        <li><a href="/set_dc?dc=50">Force duty cycle to 50%</a> (or whatever you want), turn of control loop until new electrode voltage is set.</a></li>
         </ul>
         """,data))
 
-# @route('/set_dc')
-# def set_dc():
-#     dc = float(request.query.dc)
-#     iccp.iccp_thread.request_stop("User forced cv_dc to {}".format(dc))
-#     iccp.iccp_thread.set_dc(dc)
-#     return("<h1>Controller was stopped. Duty Cycle was set to {:.2f}%.</h1>\n<p>{}</p><p><a href=\"/\">Back to main page.</a></p>".format(dc,iccp.status()))
+@route('/set_dc')
+def set_dc():
+    dc = float(request.query.dc)
+    iccp.set_fixed_dc(dc)
+    return("<h1>Set Fixed duty cycle of ({:.0f}%).</h1>\n<p>{}</p>{}".format(dc,iccp.status,BACK))
 
 @route('/set_v')
 def set_v():
     v = float(request.query.v)
-    page =  "<h1>Setting Voltage to {:.2f}%.</h1>\n<p>{}</p>".format(v,iccp.status)
-    iccp.set_voltage(v)
-    page = page + "<p>Voltage set.</p>"
-    return(page + "<p><a href=\"/\">Back to main page.</a></p>")
+    iccp.set_fixed_voltage(v)
+    return("<h1>Requesting Voltage {:.3f}%.</h1>\n<p>{}</p>{}".format(v,iccp.status,BACK))
+    
 
 # @route('/v_for_dc_regression_plot')
 # def v_for_dc_regression_plot():
