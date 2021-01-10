@@ -226,7 +226,8 @@ def v_for_dc_regression_plot():
     fig.update_layout(title='Voltage as a function of duty cycle',
                    xaxis_title='Duty Cycle (%)',
                    yaxis_title='Voltage (V)')
-    return("<h1>Voltage as a function of duty cycle, measurement started{}</h1>{}\n".format(cal_start_time, fig.to_html()))
+    ftime = time.strftime("%m/%d/%Y, %H:%M:%S",time.localtime(cal_start_time)) # really, python?
+    return("<h1>Voltage as a function of duty cycle, measurement started {}</h1>{}\n".format(ftime, fig.to_html()))
 
 run(host='localhost', port=8080, debug=True)
 
