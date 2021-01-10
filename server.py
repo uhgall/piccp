@@ -91,6 +91,7 @@ class ICCPThread(threading.Thread):
     def __init__(self, driver = None):
         self.driver = driver
         self.sample_time = 0.035
+        self.cal_start_time = None
         super().__init__()
         self.set_status("Just started.")
         self.set_fixed_voltage(self.cv_voltage)
@@ -112,16 +113,22 @@ class ICCPThread(threading.Thread):
 
     def calibrate(self):
         self.set_status("Calibration starting.")
-        self.ms_v = []
-        self.x = []
-        for cv_dc in range(0,100,5):
-            self.x.append(cv_dc)
-            self.driver.set_dc(cv_dc)
+        cal_start_time = time.time()
+        cal_ms_v = []
+        cal_cv_dc = []
+        for dc in range(0,100,5):
+            cal_cv_dc.append(dc)
+            self.driver.set_dc(dc)
             time.sleep(self.sample_time)
             v = self.driver.read_electrode_voltage()
-            self.ms_v.append(v)
-            self.set_status("Calibration routine commanded dc = {} and measured {}".format(cv_dc,v))
+            cal_ms_v.append(v)
+            self.set_status("Calibration routine commanded dc = {:.0f} % and measured {:.3f} V".format(dc,v))
         self.set_status("Calibration finished.")
+
+        # not threadsafe here but unlikely to be an issue and not deadly
+        self.cal_list_ms_v = cal_ms_v
+        self.cal_list_cv_dc = cal_cv_dc
+        self.cal_start_time = cal_start_time
 
     def run(self):
 
@@ -130,8 +137,10 @@ class ICCPThread(threading.Thread):
         while True:
             self.ms_current, self.ms_voltage = self.driver.read_current_and_electrode_voltage()
             if (self.mode == "calibration"):
-                v = self.cv_dc
+                v = self.cv_voltage
+                dc = self.cv_dc
                 self.calibrate()
+                self.cv_dc = dc
                 self.set_fixed_voltage(v)
                 self.set_status("Restarting control loop to keep voltage at {:.3f}V.".format(self.cv_dc))
             elif (self.mode == "fixed_dc"):
@@ -164,11 +173,15 @@ def home():
         <li>{{status}}</li>
         <h1>Tools</h1>
         <ul>
-        <li><a href="/v_for_dc_regression_plot">Calibration tool - Voltage as a function of duty cycle, regression plot.</a></li>
         <li><a href="/set_v?v=2.5">Set electrode voltage to 2.5V </a> (or whatever you want, by editing the URL).</li>
         <li><a href="/set_dc?dc=50">Force duty cycle to 50%</a> (or whatever you want), turn of control loop until new electrode voltage is set.</a></li>
+        <li><a href="/start_calibration">Start Calibration - Measure voltage as a function of duty cycle.</a></li>
+        <li><a href="/v_for_dc_regression_plot">Show Calibration Results (Regression plot).</a></li>
         </ul>
         """,data))
+
+
+
 
 @route('/set_dc')
 def set_dc():
@@ -182,40 +195,38 @@ def set_v():
     iccp.set_fixed_voltage(v)
     return("<h1>Requesting Voltage {:.3f}%.</h1>\n<p>{}</p>{}".format(v,iccp.status,BACK))
     
+@route('/start_calibration')
+def start_calibration():
+    if iccp.mode == "calibration":
+        return("<h1>Calibration already running</h1><p>{}</p>{}".format(iccp.status,BACK))
+    iccp.mode = "calibration"
+    return("<h1>Requested start of calibration</h1>{}".format(BACK))
 
-# @route('/v_for_dc_regression_plot')
-# def v_for_dc_regression_plot():
-#     global iccp
-#     cal = iccp.cal_thread
-#     if (cal.start_time == None):
-#         iccp.iccp_thread.request_stop("User wants to see regression plot.")
-#         cal.start()
-#         return "Started Calibration. Please reload to see results."
+@route('/v_for_dc_regression_plot')
+def v_for_dc_regression_plot():
+    cal_start_time = iccp.cal_start_time
+    if cal_start_time == None:
+        return(start_calibration())
+    list_ms_v = iccp.cal_list_ms_v
+    list_cv_dc = iccp.cal_list_cv_dc
 
-#     if (cal.is_still_running()):
-#         return("<h1>Already running</h1><p>Not finished yet, have {} points after {:.3f}s. </p>".format(cal.current_x,time.time() - cal.start_time))
+    npy = np.array(list_ms_v)
+    npx = np.array(list_cv_dc)
+    lm=LinearRegression()
+    lm.fit(npx.reshape(-1,1),npy.reshape(-1,1))
+    res=lm.predict(npx.reshape(-1,1)).reshape(1,-1)
 
-
-#     npy = np.array(cal.ms_v)
-#     npx = np.array(cal.x)
-#     lm=LinearRegression()
-#     lm.fit(npx.reshape(-1,1),npy.reshape(-1,1))
-#     res=lm.predict(npx.reshape(-1,1)).reshape(1,-1)
-
-#     print(res)
-
-#     fig = go.Figure()
-#     fig.add_trace(go.Scatter(x=cal.x, y=cal.ms_v,
-#         mode='lines',
-#         name="Electrode Voltage"))
-#     fig.add_trace(go.Scatter(x=cal.x, y=res[0],
-#         mode='lines',
-#         name="Regression fit"))
-#     fig.update_layout(title='Voltage as a function of duty cycle',
-#                    xaxis_title='Duty Cycle (%)',
-#                    yaxis_title='Voltage (V)')
-#     return("<h1>Voltage as a function of duty cycle</h1>{}\n".format(fig.to_html()))
-
+    fig = go.Figure()
+    fig.add_trace(go.Scatter(x=list_cv_dc, y=list_ms_v,
+        mode='lines',
+        name="Electrode Voltage"))
+    fig.add_trace(go.Scatter(x=list_cv_dc, y=res[0],
+        mode='lines',
+        name="Regression fit"))
+    fig.update_layout(title='Voltage as a function of duty cycle',
+                   xaxis_title='Duty Cycle (%)',
+                   yaxis_title='Voltage (V)')
+    return("<h1>Voltage as a function of duty cycle, measurement started{}</h1>{}\n".format(cal_start_time, fig.to_html()))
 
 run(host='localhost', port=8080, debug=True)
 
